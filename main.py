@@ -366,7 +366,23 @@ def get_song_info() -> tuple[dict[str, object], int]:
             # 获取完整的歌曲信息（用于前端解析）
             song_info = name_v1(music_id)
             url_info = url_v1(music_id, level, cookies)
-            lyric_info = lyric_v1(music_id, cookies)
+            
+            # 获取歌词 - 两套方案自动切换
+            lyric_info = None
+            lyric_api_method = 'None'
+            try:
+                # 方案1：优先使用EAPI
+                lyric_info = lyric_v1(music_id, cookies, use_simple_api=False)
+                lyric_api_method = 'EAPI'
+            except Exception as e:
+                api_service.logger.warning(f"EAPI获取歌词失败，降级到简单API: {e}")
+                try:
+                    # 方案2：降级到简单API
+                    lyric_info = lyric_v1(music_id, cookies, use_simple_api=True)
+                    lyric_api_method = 'Simple API'
+                except Exception as e2:
+                    api_service.logger.error(f"简单API也失败: {e2}")
+                    lyric_info = {}
             
             if not song_info or 'songs' not in song_info or not song_info['songs']:
                 return APIResponse.error("未找到歌曲信息", 404)
@@ -381,9 +397,11 @@ def get_song_info() -> tuple[dict[str, object], int]:
                 'al_name': song_data.get('al', {}).get('name', ''),
                 'pic': song_data.get('al', {}).get('picUrl', ''),
                 'level': level,
+                # 'lyric_api_method': lyric_api_method,  # 标识使用的歌词API方案
                 'lyric': lyric_info.get('lrc', {}).get('lyric', '') if lyric_info else '',
                 'tlyric': lyric_info.get('tlyric', {}).get('lyric', '') if lyric_info else '',
-                'yrc': lyric_info.get('yrc', {}).get('lyric', '') if lyric_info else ''
+                'yrc': lyric_info.get('yrc', {}).get('lyric', '') if lyric_info else '',
+                'yrcs': lyric_info.get('yrc', {}).get('lyric', '') if lyric_info else ''  # 新增：逐字歌词文本
             }
             
             # 添加URL和大小信息

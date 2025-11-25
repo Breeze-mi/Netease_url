@@ -40,7 +40,6 @@ class APIConstants:
     AES_KEY = b"e82ckenh8dichen8"
     USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/2.10.2.200154'
     REFERER = 'https://music.163.com/'
-    
     # API URLs
     SONG_URL_V1 = "https://interface3.music.163.com/eapi/song/enhance/player/url/v1"
     SONG_DETAIL_V3 = "https://interface3.music.163.com/api/v3/song/detail"
@@ -222,13 +221,13 @@ class NeteaseAPI:
         except json.JSONDecodeError as e:
             raise APIException(f"解析歌曲详情响应失败: {e}")
     
-    def get_lyric(self, song_id: int, cookies: Dict[str, str], use_eapi: bool = False) -> Dict[str, Any]:
-        """获取歌词信息（包括逐字歌词）
+    def get_lyric(self, song_id: int, cookies: Dict[str, str], use_simple_api: bool = False) -> Dict[str, Any]:
+        """获取歌词信息（包括逐字歌词）- 支持两套方案
         
         Args:
             song_id: 歌曲ID
             cookies: 用户cookies
-            use_eapi: 是否使用EAPI接口（备用方案）
+            use_simple_api: 是否使用简单API接口（社区开源方案，作为备用）
             
         Returns:
             包含歌词信息的字典，包括：
@@ -243,6 +242,15 @@ class NeteaseAPI:
         Raises:
             APIException: API调用失败时抛出
         """
+        # 方案1：使用EAPI接口（默认，功能最全）
+        if not use_simple_api:
+            return self._get_lyric_eapi(song_id, cookies)
+        else:
+            # 方案2：使用简单API接口（社区开源方案）
+            return self._get_lyric_simple(song_id, cookies)
+    
+    def _get_lyric_eapi(self, song_id: int, cookies: Dict[str, str]) -> Dict[str, Any]:
+        """方案1：使用EAPI接口获取歌词（功能最全，支持所有歌词类型）"""
         try:
             data = {
                 'id': song_id, 
@@ -271,9 +279,47 @@ class NeteaseAPI:
             
             return result
         except requests.RequestException as e:
-            raise APIException(f"获取歌词请求失败: {e}")
+            raise APIException(f"EAPI获取歌词请求失败: {e}")
         except json.JSONDecodeError as e:
-            raise APIException(f"解析歌词响应失败: {e}")
+            raise APIException(f"解析EAPI歌词响应失败: {e}")
+    
+    def _get_lyric_simple(self, song_id: int, cookies: Dict[str, str]) -> Dict[str, Any]:
+        """方案2：使用简单API接口获取歌词（社区开源方案，作为备用）
+        
+        接口地址: https://music.163.com/api/song/lyric
+        请求方法: POST（推荐）
+        """
+        try:
+            # 使用POST方法（推荐）
+            url = 'https://music.163.com/api/song/lyric'
+            data = {
+                'id': song_id,
+                'lv': 1,   # 逐行歌词
+                'kv': 1,   # 卡拉OK歌词
+                'tv': 1,   # 翻译歌词
+                'yv': 1,   # 逐字歌词
+                'rv': 1    # 罗马音歌词
+            }
+            
+            headers = {
+                'User-Agent': APIConstants.USER_AGENT,
+                'Referer': APIConstants.REFERER,
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            
+            response = requests.post(url, data=data, headers=headers, 
+                                   cookies=cookies, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            if result.get('code') != 200:
+                raise APIException(f"简单API获取歌词失败: {result.get('message', '未知错误')}")
+            
+            return result
+        except requests.RequestException as e:
+            raise APIException(f"简单API获取歌词请求失败: {e}")
+        except json.JSONDecodeError as e:
+            raise APIException(f"解析简单API歌词响应失败: {e}")
     
     def search_music(self, keywords: str, cookies: Dict[str, str], limit: int = 100) -> List[Dict[str, Any]]:
         """搜索音乐
@@ -800,10 +846,19 @@ def name_v1(song_id: int) -> Dict[str, Any]:
     return api.get_song_detail(song_id)
 
 
-def lyric_v1(song_id: int, cookies: Dict[str, str]) -> Dict[str, Any]:
-    """获取歌词（向后兼容）"""
+def lyric_v1(song_id: int, cookies: Dict[str, str], use_simple_api: bool = False) -> Dict[str, Any]:
+    """获取歌词（向后兼容）
+    
+    Args:
+        song_id: 歌曲ID
+        cookies: 用户cookies
+        use_simple_api: 是否使用简单API（社区开源方案），默认False使用EAPI
+        
+    Returns:
+        包含歌词信息的字典
+    """
     api = NeteaseAPI()
-    return api.get_lyric(song_id, cookies)
+    return api.get_lyric(song_id, cookies, use_simple_api)
 
 
 def search_music(keywords: str, cookies: Dict[str, str], limit: int = 10) -> List[Dict[str, Any]]:
