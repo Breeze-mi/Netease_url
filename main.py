@@ -14,17 +14,19 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from flask import Flask, request, Response
+from typing import Dict, Any, Optional, Tuple
+from urllib.parse import quote
+from flask import Flask, request, send_file, render_template, Response
 
 try:
     from music_api import (
-        NeteaseAPI, APIException,
+        NeteaseAPI, APIException, QualityLevel,
         url_v1, name_v1, lyric_v1, search_music, search_playlist,
         search_album, search_artist, search_all,
         playlist_detail, album_detail
     )
     from cookie_manager import CookieManager, CookieException
-    from music_downloader import MusicDownloader
+    from music_downloader import MusicDownloader, DownloadException, AudioFormat
 except ImportError as e:
     print(f"导入模块失败: {e}")
     print("请确保所有依赖模块存在且可用")
@@ -48,9 +50,9 @@ class APIResponse:
     """API响应工具类"""
     
     @staticmethod
-    def success(data: dict | list | None = None, message: str = 'success', status_code: int = 200) -> tuple[dict[str, object], int]:
+    def success(data: Any = None, message: str = 'success', status_code: int = 200) -> Tuple[Dict[str, Any], int]:
         """成功响应"""
-        response: dict[str, object] = {
+        response = {
             'status': status_code,
             'success': True,
             'message': message
@@ -60,9 +62,9 @@ class APIResponse:
         return response, status_code
     
     @staticmethod
-    def error(message: str, status_code: int = 400, error_code: str | None = None) -> tuple[dict[str, object], int]:
+    def error(message: str, status_code: int = 400, error_code: str = None) -> Tuple[Dict[str, Any], int]:
         """错误响应"""
-        response: dict[str, object] = {
+        response = {
             'status': status_code,
             'success': False,
             'message': message
@@ -76,14 +78,14 @@ class MusicAPIService:
     """音乐API服务类"""
     
     def __init__(self, config: APIConfig):
-        self.config: APIConfig = config
-        self.logger: logging.Logger = self._setup_logger()
-        self.cookie_manager: CookieManager = CookieManager()
-        self.netease_api: NeteaseAPI = NeteaseAPI()
-        self.downloader: MusicDownloader = MusicDownloader()
+        self.config = config
+        self.logger = self._setup_logger()
+        self.cookie_manager = CookieManager()
+        self.netease_api = NeteaseAPI()
+        self.downloader = MusicDownloader()
         
         # 创建下载目录
-        self.downloads_path: Path = Path(config.downloads_dir)
+        self.downloads_path = Path(config.downloads_dir)
         self.downloads_path.mkdir(exist_ok=True)
         
         self.logger.info(f"音乐API服务初始化完成，下载目录: {self.downloads_path.absolute()}")
@@ -115,7 +117,7 @@ class MusicAPIService:
         
         return logger
     
-    def _get_cookies(self) -> dict[str, str]:
+    def _get_cookies(self) -> Dict[str, str]:
         """获取Cookie"""
         try:
             cookie_str = self.cookie_manager.read_cookie()
@@ -178,14 +180,14 @@ class MusicAPIService:
         }
         return quality_names.get(quality, f"未知音质({quality})")
     
-    def _validate_request_params(self, required_params: dict[str, object]) -> tuple[dict[str, object], int] | None:
+    def _validate_request_params(self, required_params: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], int]]:
         """验证请求参数"""
         for param_name, param_value in required_params.items():
             if not param_value:
                 return APIResponse.error(f"参数 '{param_name}' 不能为空", 400)
         return None
     
-    def _safe_get_request_data(self) -> dict[str, object]:
+    def _safe_get_request_data(self) -> Dict[str, Any]:
         """安全获取请求数据"""
         try:
             if request.method == 'GET':
@@ -208,27 +210,14 @@ api_service = MusicAPIService(config)
 
 
 @app.before_request
-def before_request() -> None:
+def before_request():
     """请求前处理"""
     # 记录请求信息
-    log_msg = (
+    api_service.logger.info(
         f"{request.method} {request.path} - IP: {request.remote_addr} - "
         f"User-Agent: {request.headers.get('User-Agent', 'Unknown')}"
     )
-    api_service.logger.info(log_msg)
 
-
-# @app.after_request
-# def after_request(response: Response) -> Response:
-#     """请求后处理 - 设置CORS头"""
-#     response.headers.add('Access-Control-Allow-Origin', config.cors_origins)
-#     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-#     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-#     response.headers.add('Access-Control-Max-Age', '3600')
-    
-#     # 记录响应信息
-#     api_service.logger.info(f"响应状态: {response.status_code}")
-#     return response
 
 @app.after_request
 def after_request(response: Response) -> Response:
@@ -245,41 +234,37 @@ def after_request(response: Response) -> Response:
         response.headers['Cache-Control'] = 'public, max-age=259200'
         from datetime import datetime, timedelta
         response.headers['Expires'] = (
-            datetime.now() + timedelta(days=3)
+            datetime.now() + timedelta(days=7)
         ).strftime('%a, %d %b %Y %H:%M:%S GMT')
-        api_service.logger.debug("设置音频缓存头: 3天")
+        api_service.logger.debug("设置音频缓存头: 7天")
     
     # 记录响应信息
     api_service.logger.info(f"响应状态: {response.status_code}")
     return response
 
+
 @app.errorhandler(400)
-def handle_bad_request(e: Exception) -> tuple[dict[str, object], int]:
+def handle_bad_request(e):
     """处理400错误"""
     return APIResponse.error("请求参数错误", 400)
 
 
 @app.errorhandler(404)
-def handle_not_found(e: Exception) -> tuple[dict[str, object], int]:
+def handle_not_found(e):
     """处理404错误"""
     return APIResponse.error("请求的资源不存在", 404)
 
 
 @app.errorhandler(500)
-def handle_internal_error(e: Exception) -> tuple[dict[str, object], int]:
+def handle_internal_error(e):
     """处理500错误"""
     api_service.logger.error(f"服务器内部错误: {e}")
     return APIResponse.error("服务器内部错误", 500)
 
 
-# @app.route('/')
-# def index() -> str:
-#     """首页路由"""
-#     return render_template('index.html')
 
-
-@app.route('/health', methods=['GET'])
-def health_check() -> tuple[dict[str, object], int]:
+@app.route('/mcapi/health', methods=['GET'])
+def health_check():
     """健康检查API"""
     try:
         # 检查Cookie状态
@@ -287,7 +272,7 @@ def health_check() -> tuple[dict[str, object], int]:
         
         health_info = {
             'service': 'running',
-            'timestamp': int(time.time()),
+            'timestamp': int(time.time()) if 'time' in sys.modules else None,
             'cookie_status': 'valid' if cookie_status else 'invalid',
             'downloads_dir': str(api_service.downloads_path.absolute()),
             'version': '2.0.0'
@@ -300,28 +285,24 @@ def health_check() -> tuple[dict[str, object], int]:
         return APIResponse.error(f"健康检查失败: {str(e)}", 500)
 
 
-@app.route('/song', methods=['GET', 'POST'])
-@app.route('/Song_V1', methods=['GET', 'POST'])  # 向后兼容
-def get_song_info() -> tuple[dict[str, object], int]:
+@app.route('/mcapi/song', methods=['GET', 'POST'])
+# @app.route('/Song_V1', methods=['GET', 'POST'])  # 向后兼容
+def get_song_info():
     """获取歌曲信息API"""
     try:
         # 获取请求参数
         data = api_service._safe_get_request_data()
         song_ids = data.get('ids') or data.get('id')
         url = data.get('url')
-        level = str(data.get('level', 'lossless'))
-        info_type = str(data.get('type', 'url'))
+        level = data.get('level', 'lossless')
+        info_type = data.get('type', 'url')
         
         # 参数验证
         if not song_ids and not url:
             return APIResponse.error("必须提供 'ids'、'id' 或 'url' 参数")
         
-        # 提取音乐ID并转换为整数
-        music_id_str = api_service._extract_music_id(str(song_ids or url))
-        try:
-            music_id = int(music_id_str)
-        except ValueError:
-            return APIResponse.error(f"无效的音乐ID: {music_id_str}")
+        # 提取音乐ID
+        music_id = api_service._extract_music_id(song_ids or url)
         
         # 验证音质参数
         valid_levels = ['standard', 'exhigh', 'lossless', 'hires', 'sky', 'jyeffect', 'jymaster']
@@ -338,15 +319,15 @@ def get_song_info() -> tuple[dict[str, object], int]:
         # 根据类型获取不同信息
         if info_type == 'url':
             result = url_v1(music_id, level, cookies)
-            if result and result.get('data') and isinstance(result['data'], list) and len(result['data']) > 0:
+            if result and result.get('data') and len(result['data']) > 0:
                 song_data = result['data'][0]
                 response_data = {
                     'id': song_data.get('id'),
                     'url': song_data.get('url'),
                     'level': song_data.get('level'),
-                    'quality_name': api_service._get_quality_display_name(str(song_data.get('level', level))),
+                    'quality_name': api_service._get_quality_display_name(song_data.get('level', level)),
                     'size': song_data.get('size'),
-                    'size_formatted': api_service._format_file_size(int(song_data.get('size', 0))),
+                    'size_formatted': api_service._format_file_size(song_data.get('size', 0)),
                     'type': song_data.get('type'),
                     'bitrate': song_data.get('br')
                 }
@@ -359,8 +340,30 @@ def get_song_info() -> tuple[dict[str, object], int]:
             return APIResponse.success(result, "获取歌曲信息成功")
         
         elif info_type == 'lyric':
-            result = lyric_v1(music_id, cookies)
-            return APIResponse.success(result, "获取歌词成功")
+            # 方案1：优先使用EAPI接口获取歌词（默认，功能最全）
+            try:
+                result = lyric_v1(music_id, cookies, use_simple_api=False)
+                api_method = 'EAPI'
+            except Exception as e:
+                # 方案2：EAPI失败时自动降级到简单API（社区开源方案）
+                api_service.logger.warning(f"EAPI获取歌词失败，降级到简单API: {e}")
+                try:
+                    result = lyric_v1(music_id, cookies, use_simple_api=True)
+                    api_method = 'Simple API'
+                except Exception as e2:
+                    api_service.logger.error(f"简单API也失败: {e2}")
+                    return APIResponse.error(f"获取歌词失败: {str(e2)}", 500)
+            
+            # 格式化歌词响应
+            lyric_data = {
+                'id': music_id,
+                'api_method': api_method,  # 标识使用的API方案
+                'lrc': result.get('lrc', {}),           # 普通逐行歌词
+                'tlyric': result.get('tlyric', {}),     # 翻译歌词
+                'yrc': result.get('yrc', {}),           # 逐字歌词完整对象
+                'yrc2': result.get('yrc', {}).get('lyric', '')  # 逐字歌词文本（简化）
+            }
+            return APIResponse.success(lyric_data, f"获取歌词成功（使用{api_method}）")
         
         elif info_type == 'json':
             # 获取完整的歌曲信息（用于前端解析）
@@ -398,18 +401,20 @@ def get_song_info() -> tuple[dict[str, object], int]:
                 'pic': song_data.get('al', {}).get('picUrl', ''),
                 'level': level,
                 # 'lyric_api_method': lyric_api_method,  # 标识使用的歌词API方案
+                # 兼容旧版字段
                 'lyric': lyric_info.get('lrc', {}).get('lyric', '') if lyric_info else '',
                 'tlyric': lyric_info.get('tlyric', {}).get('lyric', '') if lyric_info else '',
                 'yrc': lyric_info.get('yrc', {}).get('lyric', '') if lyric_info else '',
-                'yrcs': lyric_info.get('yrc', {}).get('lyric', '') if lyric_info else ''  # 新增：逐字歌词文本
+                # 新增简化字段：只返回逐字歌词文本
+                'yrc2': lyric_info.get('yrc', {}).get('lyric', '') if lyric_info else ''
             }
             
             # 添加URL和大小信息
-            if url_info and url_info.get('data') and isinstance(url_info['data'], list) and len(url_info['data']) > 0:
+            if url_info and url_info.get('data') and len(url_info['data']) > 0:
                 url_data = url_info['data'][0]
                 response_data.update({
                     'url': url_data.get('url', ''),
-                    'size': api_service._format_file_size(int(url_data.get('size', 0))),
+                    'size': api_service._format_file_size(url_data.get('size', 0)),
                     'level': url_data.get('level', level)
                 })
             else:
@@ -427,33 +432,27 @@ def get_song_info() -> tuple[dict[str, object], int]:
         api_service.logger.error(f"获取歌曲信息异常: {e}\n{traceback.format_exc()}")
         return APIResponse.error(f"服务器错误: {str(e)}", 500)
 
-
-@app.route('/search', methods=['GET', 'POST'])
-@app.route('/Search', methods=['GET', 'POST'])  # 向后兼容
-def search_music_api() -> tuple[dict[str, object], int]:
+@app.route('/mcapi/search', methods=['GET', 'POST'])
+# @app.route('/Search', methods=['GET', 'POST'])  # 向后兼容
+def search_music_api():
     """搜索音乐API - 支持搜索歌曲、歌单、专辑、歌手"""
     try:
         # 获取请求参数
         data = api_service._safe_get_request_data()
         keyword = data.get('keyword') or data.get('keywords') or data.get('q')
-        
+        limit = int(data.get('limit', 30))
+        offset = int(data.get('offset', 0))
+        search_type = data.get('type', '1')  # 1-歌曲, 10-专辑, 100-歌手, 1000-歌单, all-综合搜索
+
         # 参数验证
         validation_error = api_service._validate_request_params({'keyword': keyword})
         if validation_error:
             return validation_error
-        
-        keyword = str(keyword)
-        
-        try:
-            limit = int(data.get('limit', 30))
-        except (ValueError, TypeError):
-            limit = 30
-            
+
         # 限制搜索数量
         if limit > 100:
             limit = 100
 
-        search_type = str(data.get('type', '1'))  # 1-歌曲, 10-专辑, 100-歌手, 1000-歌单, all-综合搜索
         cookies = api_service._get_cookies()
 
         # 根据类型调用不同的搜索方法
@@ -495,18 +494,17 @@ def search_music_api() -> tuple[dict[str, object], int]:
         api_service.logger.error(f"搜索音乐异常: {e}\n{traceback.format_exc()}")
         return APIResponse.error(f"搜索失败: {str(e)}", 500)
 
-
-@app.route('/playlist', methods=['GET', 'POST'])
+@app.route('/mcapi/playlist', methods=['GET', 'POST'])
 @app.route('/Playlist', methods=['GET', 'POST'])  # 向后兼容
-def get_playlist() -> tuple[dict[str, object], int]:
+def get_playlist():
     """获取歌单详情API"""
     try:
         # 获取请求参数
         data = api_service._safe_get_request_data()
-        playlist_id_raw = data.get('id')
+        playlist_id = data.get('id')
         
         # 参数验证
-        validation_error = api_service._validate_request_params({'playlist_id': playlist_id_raw})
+        validation_error = api_service._validate_request_params({'playlist_id': playlist_id})
         if validation_error:
             return validation_error
         
@@ -531,17 +529,17 @@ def get_playlist() -> tuple[dict[str, object], int]:
         return APIResponse.error(f"获取歌单失败: {str(e)}", 500)
 
 
-@app.route('/album', methods=['GET', 'POST'])
+@app.route('/mcapi/album', methods=['GET', 'POST'])
 @app.route('/Album', methods=['GET', 'POST'])  # 向后兼容
-def get_album() -> tuple[dict[str, object], int]:
+def get_album():
     """获取专辑详情API"""
     try:
         # 获取请求参数
         data = api_service._safe_get_request_data()
-        album_id_raw = data.get('id')
+        album_id = data.get('id')
         
         # 参数验证
-        validation_error = api_service._validate_request_params({'album_id': album_id_raw})
+        validation_error = api_service._validate_request_params({'album_id': album_id})
         if validation_error:
             return validation_error
         
@@ -566,7 +564,7 @@ def get_album() -> tuple[dict[str, object], int]:
         return APIResponse.error(f"获取专辑失败: {str(e)}", 500)
 
 
-# @app.route('/download', methods=['GET', 'POST'])
+# @app.route('/mcapi/download', methods=['GET', 'POST'])
 # @app.route('/Download', methods=['GET', 'POST'])  # 向后兼容
 # def download_music_api():
 #     """下载音乐API"""
@@ -699,14 +697,14 @@ def get_album() -> tuple[dict[str, object], int]:
 #             'endpoints': {
 #                 '/health': 'GET - 健康检查',
 #                 '/song': 'GET/POST - 获取歌曲信息',
-#                 '/search': 'GET/POST - 搜索音乐',
+#                 '/search': 'GET/POST - 搜索音乐（支持歌曲/歌单/专辑/歌手/综合搜索）',
 #                 '/playlist': 'GET/POST - 获取歌单详情',
 #                 '/album': 'GET/POST - 获取专辑详情',
 #                 '/download': 'GET/POST - 下载音乐',
 #                 '/api/info': 'GET - API信息'
 #             },
 #             'supported_qualities': [
-#                 'standard', 'exhigh', 'lossless', 
+#                 'standard', 'exhigh', 'lossless',
 #                 'hires', 'sky', 'jyeffect', 'jymaster'
 #             ],
 #             'config': {
@@ -715,9 +713,9 @@ def get_album() -> tuple[dict[str, object], int]:
 #                 'request_timeout': f"{config.request_timeout}s"
 #             }
 #         }
-        
+
 #         return APIResponse.success(info, "API信息获取成功")
-        
+
 #     except Exception as e:
 #         api_service.logger.error(f"获取API信息异常: {e}")
 #         return APIResponse.error(f"获取API信息失败: {str(e)}", 500)
@@ -734,14 +732,24 @@ def start_api_server():
         print(f"📋 日志级别: {config.log_level}")
         print("\n📚 API端点:")
         print(f"  ├─ GET  /health        - 健康检查")
-        print(f"  ├─ POST /song          - 获取歌曲信息")
-        print(f"  ├─ POST /search        - 搜索音乐")
+        print(f"  ├─ POST /song          - 获取歌曲信息（含歌词，支持两套方案自动切换）⭐")
+        print(f"  ├─ POST /search        - 搜索（歌曲/歌单/专辑/歌手）")
         print(f"  ├─ POST /playlist      - 获取歌单详情")
         print(f"  ├─ POST /album         - 获取专辑详情")
         print(f"  ├─ POST /download      - 下载音乐")
         print(f"  └─ GET  /api/info      - API信息")
+        print("\n🔍 搜索类型 (type参数):")
+        print(f"  ├─ 1 或 song       - 搜索歌曲")
+        print(f"  ├─ 10 或 album     - 搜索专辑")
+        print(f"  ├─ 100 或 artist   - 搜索歌手")
+        print(f"  ├─ 1000 或 playlist - 搜索歌单")
+        print(f"  └─ all             - 综合搜索（全部）")
         print("\n🎵 支持的音质:")
         print(f"  standard, exhigh, lossless, hires, sky, jyeffect, jymaster")
+        print("\n📝 歌词获取方案（自动切换）:")
+        print(f"  ├─ 方案1: EAPI接口（默认，功能最全）")
+        print(f"  └─ 方案2: 简单API（社区开源，备用降级）")
+        print(f"\n💡 使用 /song?type=lyric 或 /song?type=json 获取完整歌词")
         print("="*60)
         print(f"⏰ 启动时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print("🌟 服务已就绪，等待请求...\n")

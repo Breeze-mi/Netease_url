@@ -40,6 +40,7 @@ class APIConstants:
     AES_KEY = b"e82ckenh8dichen8"
     USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/2.10.2.200154'
     REFERER = 'https://music.163.com/'
+    
     # API URLs
     SONG_URL_V1 = "https://interface3.music.163.com/eapi/song/enhance/player/url/v1"
     SONG_DETAIL_V3 = "https://interface3.music.163.com/api/v3/song/detail"
@@ -244,7 +245,12 @@ class NeteaseAPI:
         """
         # 方案1：使用EAPI接口（默认，功能最全）
         if not use_simple_api:
-            return self._get_lyric_eapi(song_id, cookies)
+            try:
+                return self._get_lyric_eapi(song_id, cookies)
+            except APIException as e:
+                # EAPI失败时自动降级到简单API
+                self.logger.warning(f"EAPI获取歌词失败，尝试使用简单API: {e}") if hasattr(self, 'logger') else None
+                return self._get_lyric_simple(song_id, cookies)
         else:
             # 方案2：使用简单API接口（社区开源方案）
             return self._get_lyric_simple(song_id, cookies)
@@ -287,7 +293,14 @@ class NeteaseAPI:
         """方案2：使用简单API接口获取歌词（社区开源方案，作为备用）
         
         接口地址: https://music.163.com/api/song/lyric
-        请求方法: POST（推荐）
+        请求方法: POST（推荐）或 GET
+        参数说明:
+        - id: 歌曲ID（必须）
+        - lv: 请求逐行歌词（LRC），1或-1
+        - kv: 请求klyric（词级/卡拉OK词），1或-1
+        - tv: 请求翻译歌词（Trans LRC），1或-1
+        - yv: 请求逐字歌词（YRC），1或-1
+        - rv: 请求罗马音/音译歌词（romalrc），1或-1
         """
         try:
             # 使用POST方法（推荐）
